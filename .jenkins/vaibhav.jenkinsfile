@@ -10,7 +10,7 @@ pipeline{
                       image: amazon/aws-cli
                       command:
                       - sh
-                      tty:true
+                      tty: true
                       volumeMounts:
                         - name:shared-data
                           muntPath: /mnt/shared-data
