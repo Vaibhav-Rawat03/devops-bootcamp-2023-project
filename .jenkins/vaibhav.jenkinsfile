@@ -12,7 +12,7 @@ pipeline{
                       - sh
                       tty: true
                       volumeMounts:
-                        - name:shared-data
+                        - name: shared-data
                           muntPath: /mnt/shared-data
                 volumes:
                   - name: dind-storage
