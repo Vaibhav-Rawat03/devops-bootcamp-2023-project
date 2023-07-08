@@ -43,97 +43,9 @@ def BuildTagAndPush(service) {
 pipeline {
   agent {
     kubernetes {
-      yaml '''
-        apiVersion: v1
-        kind: Pod
-        spec:
-          containers:
-          - name: kubectl
-            image: dtzar/helm-kubectl:latest
-            command: ["sh"]
-            tty: true
-
-          - name: terraform
-            image: hashicorp/terraform:latest
-            command: 
-            - sh
-            tty: true
-            env:
-              - name: AWS_ACCESS_KEY_ID
-                valueFrom:
-                  secretKeyRef:
-                    name: aws-credentials
-                    key: AWS_ACCESS_KEY_ID
-
-              - name: AWS_SECRET_ACCESS_KEY
-                valueFrom:
-                  secretKeyRef:
-                    name: aws-credentials
-                    key: AWS_SECRET_ACCESS_KEY
-
-            volumeMounts:     
-              - name: shared-data
-                mountPath: /mnt/shared-data                    
-
-          - name: maven
-            image: maven:alpine
-            command:
-            - cat
-            tty: true
-            
-          - name: aws
-            image: amazon/aws-cli
-            command:
-            - sh
-            tty: true
-            volumeMounts:     
-              - name: shared-data
-                mountPath: /mnt/shared-data
-            env:
-              - name: AWS_ACCESS_KEY_ID
-                valueFrom:
-                  secretKeyRef:
-                    name: aws-credentials
-                    key: AWS_ACCESS_KEY_ID
-
-              - name: AWS_SECRET_ACCESS_KEY
-                valueFrom:
-                  secretKeyRef:
-                    name: aws-credentials
-                    key: AWS_SECRET_ACCESS_KEY                
-            
-          - name: dind  
-            image: docker:dind
-            imagePullPolicy: Always
-            ports:     
-              - containerPort: 2375
-                protocol: TCP
-            env:     
-              - name: DOCKER_TLS_CERTDIR
-                value: ""
-            resources:
-              requests:
-                cpu: 500m
-                memory: 512Mi
-              limits:
-                cpu: 2000m
-                memory: 2Gi
-            tty: true
-            volumeMounts:     
-              - name: dind-storage
-                mountPath: /var/lib/docker
-              - name: shared-data
-                mountPath: /mnt/shared-data
-            securityContext:   
-              privileged: true          
-          
-          volumes:  
-          - name: dind-storage      
-            emptyDir: {}
-          - name: shared-data
-            emptyDir: {}            
-              
-        '''
+    //   yaml '''
+    //   '''
+        yamlFile '.jenkins/pod_templates/pod_template_extended.yaml'
     }
   }
   environment { 
@@ -146,6 +58,8 @@ pipeline {
     
     SHARED_DATA_PATH = "/mnt/shared-data"
     AWS_ECR_TOKEN_FILE = "aws-ecr-token"
+    EC2_INSTANCES_PUBLIC_IP_ADDRESSES = "ec2-instances-public-ip-addresses"
+    EC2_INSTANCES_IDS = "ec2-instances-ids"
 
     GITHUB_ACCOUNT = "tsadoklf"
     GITHUB_REPO_URL = "https://github.com/${GITHUB_ACCOUNT}/devops-bootcamp-test.git"
@@ -227,9 +141,9 @@ pipeline {
       }
     }
     stage('Build-and-Push-Docker-Images') {
-    //   when {
-    //     branch 'main-1'
-    //   }
+      when {
+        branch 'main-1'
+      }
       steps {
         script {
           def services = ["frontend", "polybot", "yolo5"] 
@@ -245,15 +159,13 @@ pipeline {
     }
 
     stage('Terraform: Create Infrastructure') {
-      when {
-        branch 'main-1'
-      }
+    //   when {
+    //     branch 'main-1'
+    //   }
       steps {
         container('terraform') {
           dir(path: "terraform") {
             sh '''
-
-              echo AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
 
               echo ""
               terraform version
@@ -279,9 +191,17 @@ pipeline {
               terraform show
 
               echo ""
-              echo "Getting instance public IP"
-              OUTPUT_NAME="instance_public_ip"
-              terraform output $OUTPUT_NAME > $SHARED_DATA_PATH/$INSTANCE_PUBLIC_IP_FILE
+              echo "Getting instance ID"  
+              terraform output "instance_id" | xargs > $SHARED_DATA_PATH/$EC2_INSTANCES_IDS
+              cat $SHARED_DATA_PATH/$EC2_INSTANCES_IDS
+
+
+              echo ""
+              echo "Getting instance public IP"  
+              terraform output "instance_public_ip" | xargs > $SHARED_DATA_PATH/$EC2_INSTANCES_PUBLIC_IP_ADDRESSES
+              cat $SHARED_DATA_PATH/$EC2_INSTANCES_PUBLIC_IP_ADDRESSES
+
+
 
               echo ""
               echo "Done creating infrastructure with Terraform"
@@ -292,60 +212,100 @@ pipeline {
       }
     }
 
-    stage ("Deploy Code to EC2 Inatance"){
-       when {
-        branch 'main-1'
+// "running"
+    stage('Make sure EC2 instance is up') {
+      steps {
+        container('aws') {
+          sh '''
+            echo "Retrieving EC2 instance IDs from shared data volume ..."
+            INSTANCE_IDS=$(cat $SHARED_DATA_PATH/$EC2_INSTANCES_IDS)
+            INSTANCE_REGION="us-east-2"
+
+            echo "Restarting EC2 instances ..."
+            aws ec2 start-instances --region $INSTANCE_REGION --instance-ids $INSTANCE_IDS
+
+
+            aws ec2 describe-instance-status \
+            --query "InstanceStatuses[0].InstanceState.Name" \
+            --region $INSTANCE_REGION --instance-ids $INSTANCE_IDS | xargs
+
+
+
+            
+
+            
+          '''
+        }
       }
+    }
+            //  echo "Waiting for EC2 instance to be up ..."
+            // until $(aws ec2 describe-instance-status \
+            // --query "InstanceStatuses[0].InstanceState.Name" \
+            // --region $INSTANCE_REGION --instance-ids $INSTANCE_IDS | xargs) = "running" ; do
+            //   sleep 1
+            // done        aws ec2 wait instance-status-ok --instance-ids $INSTANCE_IDS
+
+                    //   curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
+                    //   unzip awscliv2.zip && \
+                    //   sudo ./aws/install
+    stage ("Deploy Code to EC2 Inatance"){
+    //    when {
+    //     branch 'main-1'
+    //   }
+    // if docker version &> /dev/null; then
       steps{
         container('terraform') {
-                 sh '''
-
-                  cat $SHARED_DATA_PATH/$INSTANCE_PUBLIC_IP_FILE
-
-                '''
           withCredentials([sshUserPrivateKey(credentialsId: "aws-ec2-keypair", keyFileVariable: 'CREDENTIALS_FILE')]) {
-                // sh '''
+                sh '''
 
-                //   cat $SHARED_DATA_PATH/$INSTANCE_PUBLIC_IP_FILE
+                    EC2_INSTANCE_PUBLIC_IP=$(cat $SHARED_DATA_PATH/$EC2_INSTANCES_PUBLIC_IP_ADDRESSES)  
+                    EC2_ADMIN_USERNAME="ubuntu"
+                    EC2_ADDRESS="${EC2_ADMIN_USERNAME}@${EC2_INSTANCE_PUBLIC_IP}"
 
-                // '''
-                // sh '''
+                    ssh -o StrictHostKeyChecking=no -i ${CREDENTIALS_FILE} ${EC2_ADDRESS} """
+                        mkdir -p /home/ubuntu/test
+                        ls -l
+                    """
 
+                    echo ""
+                    echo "Copying docker-compose.yaml to EC2 instance"
+                    scp -r -i ${CREDENTIALS_FILE} object-detection/docker-compose.yaml ${EC2_ADDRESS}:/home/ubuntu/test/docker-compose.yaml
 
-                //   ssh -o StrictHostKeyChecking=no -i ${CREDENTIALS_FILE} ubuntu@3.23.150.145 """
-                //     mkdir -p /home/ubuntu/test
-                //     ls -l
-                //     """
+                    echo ""
+                    echo "Copying aws-ecr-token to EC2 instance"
+                    scp -r -i ${CREDENTIALS_FILE} $SHARED_DATA_PATH/$AWS_ECR_TOKEN_FILE ${EC2_ADDRESS}:/home/ubuntu/test/$AWS_ECR_TOKEN_FILE
 
-                //   scp -r -i ${CREDENTIALS_FILE} object-detection/docker-compose.yaml ubuntu@3.23.150.145:/home/ubuntu/test/docker-compose.yaml
+                    echo ""
+                    echo "Running docker-compose.yaml on EC2 instance"
+                  ssh -o StrictHostKeyChecking=no -i ${CREDENTIALS_FILE} ${EC2_ADDRESS} """
 
-                //   ssh -o StrictHostKeyChecking=no -i ${CREDENTIALS_FILE} ubuntu@3.23.150.145 """
+                    echo ""
+                    echo "Checking if Docker is installed"
+                    if [[ "$(which docker)" != "" && "$(docker --version)" != "" ]]; then
+                        echo "TODO: check if Docker is installed"
 
-                //     if docker version &> /dev/null; then
-                  
-                //       sudo apt update
-                //       sudo apt -y install docker.io 
-                //       sudo apt -y install docker-compose
-                //       sudo apt -y install curl unzip 
+                    fi
+         
+                    sudo apt update
+                    sudo apt -y install docker.io 
+                    sudo apt -y install docker-compose
+                    sudo apt -y install curl unzip 
 
-                //       curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
-                //       unzip awscliv2.zip && \
-                //       sudo ./aws/install
+                    echo ""
+                    echo "Waiting for Docker daemon to be up ..."
+                    until sudo docker version &> /dev/null; do
+                    sleep 1
+                    done
+                    echo "Docker daemon is up!"
 
-                //     fi
+                    cat test/$AWS_ECR_TOKEN_FILE | sudo docker login --password-stdin --username $DOCKER_USERNAME $REGISTRY 
 
-                //     export AWS_ACCESS_KEY_ID=AKIA4NYEYP6K5UPKPDOM
-                //     export AWS_SECRET_ACCESS_KEY=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
-                //     export AWS_DEFAULT_REGION=us-east-2
-
-                //     aws ecr get-login-password --region us-east-2 | sudo docker login --username AWS --password-stdin 854171615125.dkr.ecr.us-east-2.amazonaws.com
-
-                //     sudo docker-compose -f test/docker-compose.yaml pull
-                //     sudo docker-compose -f test/docker-compose.yaml up -d --remove-orphans
-                //     sudo docker-compose -f test/docker-compose.yaml ps
-                //     yes | sudo docker image prune
-                //     """
-                // '''
+                    sudo docker-compose -f test/docker-compose.yaml pull
+                    sudo docker-compose -f test/docker-compose.yaml up -d --remove-orphans
+                    sudo docker-compose -f test/docker-compose.yaml ps
+                    yes | sudo docker image prune
+                    """
+                '''
 
           }
         }
